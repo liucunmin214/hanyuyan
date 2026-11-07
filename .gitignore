@@ -1,0 +1,22 @@
+# 构建工具链（需自行下载 w64devkit 放入此目录）
+tools/
+
+# 编译产物
+build/
+*.obj
+*.o
+*.res
+
+# 安装包构建中间文件（仅保留 dist/ 下的成品安装包）
+installer/*.tmp
+
+# 临时文件
+*.tmp
+*.log
+Thumbs.db
+desktop.ini
+
+# 编辑器/IDE 配置
+.vscode/
+.idea/
+*.swp
