@@ -338,7 +338,7 @@
         <li><mark class="key">全角标点自动归一</mark>：，。（）：等中文标点直接写，编译器自动识别</li>
         <li><mark class="key">静态类型 + 类型推断</mark>：类型在编译期检查，大多数情况可省略标注</li>
         <li><mark class="key">真正的编译</mark>：产出独立 Windows exe，不需要安装任何运行时</li>
-        <li><mark class="key">块用「结束」收尾</mark>：不用大括号，如果、当、函数 一律以 结束 结束</li>
+        <li><mark class="key">Python 式缩进块 + 字符串插值</mark>：块用缩进划分，不再需要「结束」（旧写法完全兼容）；字符串里写 {表达式} 自动转文字拼接</li>
       </ul>
     </section>
 
@@ -415,33 +415,39 @@ flowchart LR
 打印 7 % 3              # 1，取余
 打印 "你好，" + "世界"  # 文字拼接
 打印 3 > 2 与 1 < 5     # 真（与/或/非 即 &&/||/!）</code></pre>
+      <h3>字符串插值</h3>
+      <p>在字符串里写 <code class="inline">{表达式}</code>，求值结果自动转成文字拼进去，比手写 <code class="inline">+</code> 清爽得多：</p>
+      <pre class="code"><code>变量 名字 = "小明"
+变量 年龄 = 18
+打印("你好，{名字}，今年 {年龄} 岁")   # 你好，小明，今年 18 岁
+打印("明年 {年龄 + 1} 岁")            # 插值里可以写任意表达式
+打印("字面大括号写两遍：{{}}")        # 字面大括号写两遍：{}</code></pre>
       <p>比较运算 <code class="inline">== != &lt; &lt;= &gt; &gt;=</code> 结果是布尔值；<mark class="key">= 是赋值，== 才是判等</mark>，写错时编译器会提醒你。</p>
     </section>
 
     <section id="s6">
       <h2>6 · 控制流</h2>
       <h3>如果 / 否则</h3>
-      <p>注意「否则」写在<mark class="key">前一个「结束」之后</mark>，这是汉语言的独特结构：</p>
+      <p>块用<mark class="key">缩进</mark>划分（Python 风格）：块内语句比块头多一级缩进，缩进回退即块结束，<code class="inline">否则</code> 与 <code class="inline">如果</code> 对齐：</p>
       <pre class="code"><code>变量 分数 = 85
 如果 分数 >= 90
-  打印 "优秀"
-结束
+    打印 "优秀"
 否则
-  打印 "继续加油"
-结束</code></pre>
+    打印 "继续加油"</code></pre>
       <h3>当 —— 条件循环</h3>
       <pre class="code"><code>变量 倒计时 = 3
 当 倒计时 > 0
-  打印 倒计时
-  倒计时 = 倒计时 - 1
-结束
+    打印 倒计时
+    倒计时 = 倒计时 - 1
 打印 "出发！"</code></pre>
       <h3>对于 —— 区间循环</h3>
       <pre class="code"><code>变量 总和 = 0
 对于 数 = 1 到 100
-  总和 = 总和 + 数
-结束
+    总和 = 总和 + 数
 打印 总和        # 5050</code></pre>
+      <div class="callout">
+        <span class="t">兼容</span>　旧的「结束」写法完全支持：块以 结束 收尾、否则写在前一个 结束 之后，两种形态可以混用。括号 ( [ 内可以自由换行，缩进不起作用。
+      </div>
       <p>循环里可用 <code class="inline">跳出</code>（结束循环）与 <code class="inline">继续</code>（跳到下一轮）。</p>
     </section>
 

@@ -1,4 +1,4 @@
-#include "link/link.h"
+#include "link/link.h" //我来证明，这里有些是我写的
 #include "obj/obj.h"
 #include <string.h>
 
@@ -18,7 +18,7 @@ typedef struct {
     const char *sym;    /* __imp_XXX */
     const char *fn;     /* XXX */
     uint32_t    hn_off; /* .idata 内偏移 */
-    uint32_t    hn_rva;
+    uint32_t    hn_rva; /* .idata 内 RVA */
     uint32_t    iat_rva;
 } Import;
 

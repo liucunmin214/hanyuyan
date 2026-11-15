@@ -278,6 +278,148 @@ static void t_assignment_stmt(void) {
     ch_arena_destroy(a);
 }
 
+static void t_if_indent_style(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    /* 新式缩进块：无「结束」，否则由缩进回退触发 */
+    AstNode **decls = parse_str(a, &d,
+        "函数 f()\n  如果 a\n    打印 1\n  否则\n    打印 2\n", &n);
+    CHECK(ch_diag_error_count(&d) == 0, "缩进块无错误");
+    Stmt *s = decls[0]->as.decl->u.fn.body->u.block.stmts[0];
+    CHECK(s->kind == ST_IF, "缩进式如果");
+    CHECK(s->u.iff.else_b != NULL, "缩进式否则分支");
+    CHECK(s->u.iff.then_b->u.block.stmts[0]->kind == ST_PRINT, "缩进式分支内容");
+    ch_arena_destroy(a);
+}
+
+static void t_while_for_indent_style(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    AstNode **decls = parse_str(a, &d,
+        "函数 f()\n  当 i < 3\n    i = i + 1\n  对于 j = 1 到 3\n    打印 j\n", &n);
+    CHECK(ch_diag_error_count(&d) == 0, "缩进当/对于无错误");
+    Stmt *blk = decls[0]->as.decl->u.fn.body;
+    CHECK(blk->u.block.stmts[0]->kind == ST_WHILE, "缩进式当");
+    CHECK(blk->u.block.stmts[1]->kind == ST_FOR, "缩进式对于");
+    ch_arena_destroy(a);
+}
+
+static void t_interp_string(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    /* "你好，{名字}" → 字面段 + 转文字(名字) 左结合相加 */
+    AstNode **decls = parse_str(a, &d, "变量 s = \"你好，{名字}\"\n", &n);
+    CHECK(ch_diag_error_count(&d) == 0, "插值解析无错误");
+    Expr *e = decls[0]->as.decl->u.var.init;
+    CHECK(e->kind == EX_BINARY && e->u.binary.op == TK_PLUS, "插值为拼接链");
+    CHECK(e->u.binary.lhs->kind == EX_STRING, "左段为字面");
+    CHECK(strcmp(e->u.binary.lhs->u.sval, "你好，") == 0, "字面段内容");
+    CHECK(e->u.binary.rhs->kind == EX_CALL, "插值为转文字调用");
+    CHECK(e->u.binary.rhs->u.call.callee->kind == EX_IDENT &&
+          strcmp(e->u.binary.rhs->u.call.callee->u.sval, "转文字") == 0, "调用转文字");
+    ch_arena_destroy(a);
+}
+
+static void t_interp_tail_segment(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    /* "值={x}。" → 转文字(x) + "." 两段 */
+    AstNode **decls = parse_str(a, &d, "变量 s = \"值={x}。\"\n", &n);
+    CHECK(ch_diag_error_count(&d) == 0, "带尾段插值无错误");
+    Expr *e = decls[0]->as.decl->u.var.init;
+    CHECK(e->kind == EX_BINARY && e->u.binary.op == TK_PLUS, "尾段拼接");
+    /* 左结合：(值 + 转文字(x)) + "。" */
+    CHECK(e->u.binary.lhs->kind == EX_BINARY &&
+          e->u.binary.lhs->u.binary.rhs->kind == EX_CALL, "左侧为转文字调用");
+    CHECK(e->u.binary.rhs->kind == EX_STRING &&
+          strcmp(e->u.binary.rhs->u.sval, "。") == 0, "尾段字面内容");
+    ch_arena_destroy(a);
+}
+
+static void t_interp_escape(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    /* {{}} 转义为普通文字，不产生插值 */
+    AstNode **decls = parse_str(a, &d, "变量 s = \"{{x}}\"\n", &n);
+    CHECK(ch_diag_error_count(&d) == 0, "转义无错误");
+    Expr *e = decls[0]->as.decl->u.var.init;
+    CHECK(e->kind == EX_STRING, "转义后为普通文字");
+    CHECK(strcmp(e->u.sval, "{x}") == 0, "转义内容为 {x}");
+    ch_arena_destroy(a);
+}
+
+static void t_varref_expr(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    AstNode **decls = parse_str(a, &d, "变量 b = 【a】 + 1\n", &n);
+    CHECK(ch_diag_error_count(&d) == 0, "变量引用表达式无错误");
+    Expr *e = decls[0]->as.decl->u.var.init;
+    CHECK(e->kind == EX_BINARY && e->u.binary.lhs->kind == EX_IDENT,
+          "变量引用参与运算");
+    CHECK(strcmp(e->u.binary.lhs->u.sval, "a") == 0, "变量引用名称");
+    ch_arena_destroy(a);
+}
+
+static void t_varref_assignment(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    AstNode **decls = parse_str(a, &d,
+        "函数 f()\n  【a】 = 2\n结束\n", &n);
+    CHECK(ch_diag_error_count(&d) == 0, "变量引用赋值无错误");
+    Stmt *s = decls[0]->as.decl->u.fn.body->u.block.stmts[0];
+    CHECK(s->kind == ST_ASSIGN && s->u.assign.target->kind == EX_IDENT,
+          "变量引用可作为赋值目标");
+    ch_arena_destroy(a);
+}
+
+static void t_print_multiple_items(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    AstNode **decls = parse_str(a, &d,
+        "函数 f()\n  打印 \"变量a:\" 【a】\"123\"\n结束\n", &n);
+    CHECK(ch_diag_error_count(&d) == 0, "连续多项打印无错误");
+    Stmt *s = decls[0]->as.decl->u.fn.body->u.block.stmts[0];
+    CHECK(s->kind == ST_PRINT, "多项打印语句");
+    Expr *e = s->u.prnt.expr;
+    CHECK(e->kind == EX_BINARY && e->u.binary.op == TK_PLUS,
+          "多项打印降为拼接");
+    CHECK(e->u.binary.rhs->kind == EX_STRING &&
+          strcmp(e->u.binary.rhs->u.sval, "123") == 0,
+          "最后一个输出项");
+    ch_arena_destroy(a);
+}
+
+static void t_varref_postfix(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    AstNode **decls = parse_str(a, &d,
+        "变量 x = 列表[【下标】]\n变量 y = 函数值(【参数】)\n", &n);
+    (void)decls;
+    CHECK(ch_diag_error_count(&d) == 0, "变量引用可用于索引和参数");
+    ch_arena_destroy(a);
+}
+
+static void t_indent_dict_in_interp(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    /* 插值内的字典字面量：内层 } 不应终止插值 */
+    AstNode **decls = parse_str(a, &d,
+        "变量 s = \"名字={ {k: 1}.k }\"\n", &n);
+    (void)decls;
+    CHECK(ch_diag_error_count(&d) == 0, "插值内字典无错误");
+    ch_arena_destroy(a);
+}
+
 int main(void) {
     t_function_decl();
     t_var_decl();
@@ -301,6 +443,16 @@ int main(void) {
     t_error_recovery();
     t_fullwidth_punct();
     t_assignment_stmt();
+    t_if_indent_style();
+    t_while_for_indent_style();
+    t_interp_string();
+    t_interp_tail_segment();
+    t_interp_escape();
+    t_indent_dict_in_interp();
+    t_varref_expr();
+    t_varref_assignment();
+    t_print_multiple_items();
+    t_varref_postfix();
     printf("解析器测试：通过 %d 例，失败 %d 例\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }

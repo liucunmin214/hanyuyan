@@ -48,9 +48,10 @@ static void skip_newlines(Parser *p) {
     while (check(p, TK_NEWLINE)) advance(p);
 }
 
-/* 错误恢复：跳到下一条语句边界（换行/结束/EOF） */
+/* 错误恢复：跳到下一条语句边界（换行/缩进变化/结束/否则/EOF） */
 static void sync_stmt(Parser *p) {
-    while (!check(p, TK_EOF) && !check(p, TK_NEWLINE) && !check(p, TK_KW_END))
+    while (!check(p, TK_EOF) && !check(p, TK_NEWLINE) && !check(p, TK_KW_END) &&
+           !check(p, TK_KW_ELSE) && !check(p, TK_INDENT) && !check(p, TK_DEDENT))
         advance(p);
     if (check(p, TK_NEWLINE)) advance(p);
 }
@@ -108,7 +109,7 @@ static ChType *parse_type(Parser *p) {
 /* ---------- 前向声明 ---------- */
 static Expr *parse_expr(Parser *p);
 static Stmt *parse_stmt(Parser *p);
-static Stmt *parse_block(Parser *p);
+static Stmt *parse_block(Parser *p, bool *indent_style);
 
 /* 从当前 '(' 起扫描到配对的 ')'，若其后是 '=>' 则按匿名函数解析 */
 static bool is_lambda_ahead(Parser *p) {
@@ -157,6 +158,53 @@ static Expr *parse_lambda(Parser *p) {
     return ch_ast_lambda(p->arena, line, col, parr, pc, body);
 }
 
+/* 把输出项转换为文字；普通文字字面量无需再包一层调用。 */
+static Expr *to_text_expr(Parser *p, Expr *e, int line, int col) {
+    if (e && e->kind == EX_STRING) return e;
+    Expr *callee = ch_ast_ident(p->arena, line, col, "转文字");
+    Expr **args = ch_arena_alloc(p->arena, sizeof(Expr *));
+    args[0] = e;
+    return ch_ast_call(p->arena, line, col, callee, args, 1);
+}
+
+/* ---------- 插值文字降糖 ---------- */
+/* "你好，{名字}" → 字面段 + 转文字(名字) + ... 的左结合 + 链。
+ * 词法器保证记号序列：TK_ISTRING (TK_LBRACE 表达式 TK_RBRACE TK_ISTRING)* */
+static Expr *parse_interp_string(Parser *p) {
+    const Token *t = peek(p);
+    int line = t->line, col = t->col;
+    Expr *acc = NULL;
+    const char *cur = t->sval ? t->sval : "";
+    advance(p);
+    while (check(p, TK_LBRACE)) {
+        /* 先并入字面段 */
+        if (cur[0] != '\0') {
+            Expr *lit = ch_ast_string(p->arena, line, col, cur);
+            acc = acc ? ch_ast_binary(p->arena, line, col, TK_PLUS, acc, lit) : lit;
+        }
+        advance(p); /* { */
+        Expr *e = parse_expr(p);
+        expect(p, TK_RBRACE, "'}'（插值表达式结束）");
+        /* 非文字值自动转文字：转文字(表达式) */
+        Expr *call = to_text_expr(p, e, line, col);
+        acc = acc ? ch_ast_binary(p->arena, line, col, TK_PLUS, acc, call) : call;
+        /* 下一字面段（词法器保证存在，可能为空段） */
+        if (check(p, TK_ISTRING)) {
+            cur = peek(p)->sval ? peek(p)->sval : "";
+            advance(p);
+        } else {
+            cur = "";
+        }
+    }
+    /* 收尾字面段 */
+    if (cur[0] != '\0') {
+        Expr *lit = ch_ast_string(p->arena, line, col, cur);
+        acc = acc ? ch_ast_binary(p->arena, line, col, TK_PLUS, acc, lit) : lit;
+    }
+    if (!acc) acc = ch_ast_string(p->arena, line, col, "");
+    return acc;
+}
+
 /* ---------- 主表达式 ---------- */
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
@@ -165,10 +213,12 @@ static Expr *parse_primary(Parser *p) {
     case TK_INT:    advance(p); return ch_ast_int(p->arena, line, col, t->ival);
     case TK_FLOAT:  advance(p); return ch_ast_float(p->arena, line, col, t->fval);
     case TK_STRING: advance(p); return ch_ast_string(p->arena, line, col, t->sval);
+    case TK_ISTRING: return parse_interp_string(p);
     case TK_KW_TRUE:  advance(p); return ch_ast_bool(p->arena, line, col, true);
     case TK_KW_FALSE: advance(p); return ch_ast_bool(p->arena, line, col, false);
     case TK_KW_NIL: advance(p); return ch_ast_nil(p->arena, line, col);
-    case TK_IDENT: {
+    case TK_IDENT:
+    case TK_VARREF: {
         advance(p);
         return ch_ast_ident(p->arena, line, col, t->text);
     }
@@ -193,6 +243,11 @@ static Expr *parse_primary(Parser *p) {
                 const char **ks = ch_vec_push(&keys);
                 if (k->kind == TK_IDENT) { *ks = k->text; advance(p); }
                 else if (k->kind == TK_STRING) { *ks = k->sval; advance(p); }
+                else if (k->kind == TK_ISTRING) {
+                    err(p, k->line, k->col, "字典键不支持插值（键必须是固定的文字）");
+                    *ks = "";
+                    advance(p);
+                }
                 else {
                     err(p, k->line, k->col, "字典键应为标识符或文字");
                     *ks = "";
@@ -404,18 +459,73 @@ static Expr *parse_expr(Parser *p) {
     return parse_assignment(p);
 }
 
+/* 当前记号能否作为一个新输出项的起点（仅用于连续多项打印）。 */
+static bool starts_expr(Parser *p) {
+    switch (peek(p)->kind) {
+    case TK_INT: case TK_FLOAT: case TK_STRING: case TK_ISTRING:
+    case TK_IDENT: case TK_VARREF:
+    case TK_KW_TRUE: case TK_KW_FALSE: case TK_KW_NIL:
+    case TK_LPAREN: case TK_LBRACKET: case TK_LBRACE:
+    case TK_MINUS: case TK_BANG: case TK_KW_NOT:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /* ---------- 语句块 ---------- */
-static Stmt *parse_block(Parser *p) {
+/* 缩进为主（新式），「结束」兼容保留（旧式）。
+ * 新式：头行换行后紧跟缩进 → 消费 TK_INDENT，语句循环到 TK_DEDENT；
+ *       DEDENT 后可选消费一个「结束」（兼容「缩进体 + 结束」混用）。
+ * 旧式：语句循环直到「结束」/「否则」（容忍装饰性缩进），由调用方期望「结束」。
+ * *indent_style 置 true 表示块由缩进结束（调用方无需再期望「结束」）。 */
+static Stmt *parse_block(Parser *p, bool *indent_style) {
     ChVec stmts;
     ch_vec_init(&stmts, sizeof(Stmt*));
+    if (indent_style) *indent_style = false;
     skip_newlines(p);
-    while (!check(p, TK_EOF) && !check(p, TK_KW_END) && !check(p, TK_KW_ELSE)) {
-        Stmt *s = parse_stmt(p);
-        if (s) {
-            Stmt **slot = ch_vec_push(&stmts);
-            *slot = s;
+    if (check(p, TK_INDENT)) {
+        /* 新式：缩进块 */
+        advance(p);
+        for (;;) {
+            skip_newlines(p);
+            if (check(p, TK_INDENT)) {
+                err(p, peek(p)->line, peek(p)->col,
+                    "意外的缩进（块内语句应与块首行对齐，跨行表达式请用括号）");
+                advance(p);
+                continue;
+            }
+            if (check(p, TK_DEDENT) || check(p, TK_EOF) ||
+                check(p, TK_KW_END) || check(p, TK_KW_ELSE))
+                break;
+            Stmt *s = parse_stmt(p);
+            if (s) {
+                Stmt **slot = ch_vec_push(&stmts);
+                *slot = s;
+            } else {
+                sync_stmt(p);
+                if (check(p, TK_EOF) || check(p, TK_DEDENT) ||
+                    check(p, TK_KW_END) || check(p, TK_KW_ELSE))
+                    break;
+            }
         }
-        skip_newlines(p);
+        if (check(p, TK_DEDENT)) {
+            advance(p);
+            if (indent_style) *indent_style = true;
+            skip_newlines(p);
+            match(p, TK_KW_END); /* 兼容：缩进体后跟「结束」 */
+        }
+    } else {
+        /* 旧式：语句循环直到「结束」/「否则」，容忍装饰性缩进 */
+        while (!check(p, TK_EOF) && !check(p, TK_KW_END) && !check(p, TK_KW_ELSE)) {
+            if (check(p, TK_INDENT) || check(p, TK_DEDENT)) { advance(p); continue; }
+            Stmt *s = parse_stmt(p);
+            if (s) {
+                Stmt **slot = ch_vec_push(&stmts);
+                *slot = s;
+            }
+            skip_newlines(p);
+        }
     }
     int sc = (int)stmts.len;
     Stmt **arr = ch_arena_alloc(p->arena, sc * sizeof(Stmt*));
@@ -454,7 +564,8 @@ static Stmt *parse_stmt(Parser *p) {
     case TK_KW_RETURN: {
         advance(p);
         Expr *val = NULL;
-        if (!check(p, TK_NEWLINE) && !check(p, TK_SEMI) && !check(p, TK_KW_END) && !check(p, TK_EOF))
+        if (!check(p, TK_NEWLINE) && !check(p, TK_SEMI) && !check(p, TK_KW_END) &&
+            !check(p, TK_KW_ELSE) && !check(p, TK_DEDENT) && !check(p, TK_EOF))
             val = parse_expr(p);
         match(p, TK_SEMI);
         return ch_stmt_return(p->arena, line, col, val);
@@ -463,15 +574,29 @@ static Stmt *parse_stmt(Parser *p) {
         advance(p);
         Expr *cond = parse_expr(p);
         skip_newlines(p);
-        Stmt *then_b = parse_block(p);
-        expect(p, TK_KW_END, "'结束'");
+        bool ind1 = false;
+        Stmt *then_b = parse_block(p, &ind1);
         Stmt *else_b = NULL;
         skip_newlines(p);          /* 允许「结束」与「否则」分行书写 */
-        if (match(p, TK_KW_ELSE)) {
-            skip_newlines(p);
-            /* 否则 块 */
-            else_b = parse_block(p);
+        if (ind1) {
+            /* 新式：缩进块已自行收尾，直接看「否则」 */
+            if (match(p, TK_KW_ELSE)) {
+                skip_newlines(p);
+                bool ind2 = false;
+                else_b = parse_block(p, &ind2);
+                if (!ind2) expect(p, TK_KW_END, "'结束'");
+            }
+        } else {
+            /* 旧式：需要「结束」收尾 */
             expect(p, TK_KW_END, "'结束'");
+            skip_newlines(p);
+            if (match(p, TK_KW_ELSE)) {
+                skip_newlines(p);
+                /* 否则 块 */
+                bool ind2 = false;
+                else_b = parse_block(p, &ind2);
+                if (!ind2) expect(p, TK_KW_END, "'结束'");
+            }
         }
         return ch_stmt_if(p->arena, line, col, cond, then_b, else_b);
     }
@@ -479,8 +604,9 @@ static Stmt *parse_stmt(Parser *p) {
         advance(p);
         Expr *cond = parse_expr(p);
         skip_newlines(p);
-        Stmt *body = parse_block(p);
-        expect(p, TK_KW_END, "'结束'");
+        bool ind = false;
+        Stmt *body = parse_block(p, &ind);
+        if (!ind) expect(p, TK_KW_END, "'结束'");
         return ch_stmt_while(p->arena, line, col, cond, body);
     }
     case TK_KW_FOR: {
@@ -493,8 +619,9 @@ static Stmt *parse_stmt(Parser *p) {
         else err(p, peek(p)->line, peek(p)->col, "期望 '到'");
         Expr *end = parse_expr(p);
         skip_newlines(p);
-        Stmt *body = parse_block(p);
-        expect(p, TK_KW_END, "'结束'");
+        bool ind = false;
+        Stmt *body = parse_block(p, &ind);
+        if (!ind) expect(p, TK_KW_END, "'结束'");
         return ch_stmt_for(p->arena, line, col, var->text, start, end, body);
     }
     case TK_KW_BREAK:    advance(p); match(p, TK_SEMI); return ch_stmt_break(p->arena, line, col);
@@ -502,6 +629,19 @@ static Stmt *parse_stmt(Parser *p) {
     case TK_KW_PRINT: {
         advance(p);
         Expr *e = parse_expr(p);
+        /* 连续书写多个输出项时，各项自动转文字并以一个空格分隔：
+         * 打印 "变量a:" 【a】"123" → "变量a: " + 转文字(a) + " 123" */
+        if (starts_expr(p)) {
+            Expr *acc = to_text_expr(p, e, line, col);
+            while (starts_expr(p)) {
+                Expr *sep = ch_ast_string(p->arena, line, col, " ");
+                acc = ch_ast_binary(p->arena, line, col, TK_PLUS, acc, sep);
+                Expr *item = parse_expr(p);
+                Expr *text = to_text_expr(p, item, line, col);
+                acc = ch_ast_binary(p->arena, line, col, TK_PLUS, acc, text);
+            }
+            e = acc;
+        }
         match(p, TK_SEMI);
         return ch_stmt_print(p->arena, line, col, e);
     }
@@ -565,8 +705,9 @@ static Decl *parse_decl(Parser *p) {
         ChType *ret = NULL;
         if (match(p, TK_ARROW)) ret = parse_type(p);
         skip_newlines(p);
-        Stmt *body = parse_block(p);
-        expect(p, TK_KW_END, "'结束'");
+        bool ind = false;
+        Stmt *body = parse_block(p, &ind);
+        if (!ind) expect(p, TK_KW_END, "'结束'");
         int pc = (int)params.len;
         Param *parr = ch_arena_alloc(p->arena, (size_t)(pc ? pc : 1) * sizeof(Param));
         if (pc) memcpy(parr, params.data, (size_t)pc * sizeof(Param));
@@ -621,6 +762,14 @@ AstNode **ch_parse(ChArena *arena, ChDiagList *diags,
     ch_vec_init(&decls, sizeof(AstNode*));
     skip_newlines(&p);
     while (!check(&p, TK_EOF)) {
+        /* 顶层容错：跳过残留的取消缩进；缩进的顶层语句报错 */
+        if (check(&p, TK_DEDENT)) { advance(&p); skip_newlines(&p); continue; }
+        if (check(&p, TK_INDENT)) {
+            err(&p, peek(&p)->line, peek(&p)->col, "顶层语句不应缩进");
+            advance(&p);
+            skip_newlines(&p);
+            continue;
+        }
         size_t before = p.pos;
         Decl *d = parse_decl(&p);
         if (d) {

@@ -1,4 +1,4 @@
-#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN //说什么
 #include <windows.h>
 
 #include "util/common.h"
@@ -13,7 +13,7 @@
 #include "coff/coff.h"
 #include "link/link.h"
 
-/* 由 build.ps1 生成的运行时目标文件字节数组 */
+/* 由 build.ps1 生成的运行时目标文件字节数组(实在不知道写什么，只能认真写了)*/
 extern const unsigned char ch_runtime_obj[];
 extern const unsigned int  ch_runtime_obj_len;
 
@@ -30,7 +30,7 @@ static void usage(void) {
     printf("  --help          显示此帮助\n");
 }
 
-/* 由源文件路径推导默认输出路径：去掉目录与扩展名，加 .exe */
+/* 由源文件路径推导默认输出路径：去掉目录与扩展名，加 .exe *(这是VS Code自动生成的，我只按了TAB)*/
 static void default_output(const char *src, char *buf, size_t n) {
     /* 输出 exe 与源文件同目录：把扩展名替换为 .exe，
      * 代码保存在任何位置都能就地生成、就地运行。 */
@@ -72,7 +72,7 @@ typedef struct {
     ChDiagList *diags;
     ChVec       paths;     /* const char *：已展开的规范路径（去重） */
     ChVec       loading;   /* const char *：正在展开的路径栈（环检测） */
-    bool        failed;    /* 子文件读取/解析失败 */
+    bool        failed;    /* 子文件读取/解析失败(我觉得写注释好看一点)*/
 } Loader;
 
 /* 规范化为绝对路径，失败时返回原路径副本 */

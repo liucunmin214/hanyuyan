@@ -8,10 +8,14 @@
 typedef enum {
     TK_EOF = 0,        /* 文件结尾 */
     TK_NEWLINE,        /* 换行（语句分隔符） */
+    TK_INDENT,         /* 缩进开始（Python 风格块） */
+    TK_DEDENT,         /* 缩进结束 */
     TK_IDENT,          /* 标识符 */
     TK_INT,            /* 整数 */
     TK_FLOAT,          /* 小数 */
-    TK_STRING,         /* 文字 */
+    TK_STRING,         /* 文字（无插值） */
+    TK_ISTRING,        /* 插值文字的字面段（与表达式记号交错出现） */
+    TK_VARREF,         /* 【变量名】形式的变量引用 */
 
     TK_KW_FN,          /* 函数 / 定义 */
     TK_KW_RETURN,      /* 返回 */

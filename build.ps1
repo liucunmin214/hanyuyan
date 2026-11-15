@@ -165,6 +165,28 @@ if ($Test) {
     $diffAdv = Compare-Object -ReferenceObject $wantAdv -DifferenceObject $gotAdv
     if ($diffAdv) { $diffAdv | Format-Table -AutoSize | Out-Host; throw '高级特性样例输出与期望不符' }
 
+    Write-Host '端到端：缩进与插值样例（缩进块/字符串插值/新旧混用，编译 -> 运行 -> 比对） ...'
+    $indExe = Join-Path $bin '缩进与插值.exe'
+    & (Join-Path $bin 'han.exe') (Join-Path $root 'tests\cases\缩进与插值.汉') -o $indExe
+    if ($LASTEXITCODE -ne 0) { throw '缩进与插值样例编译失败' }
+    & $indExe | Out-File -Encoding utf8 (Join-Path $bin '缩进与插值-输出.txt')
+    if ($LASTEXITCODE -ne 0) { throw '缩进与插值样例运行失败' }
+    $wantInd = Get-Content (Join-Path $root 'tests\cases\缩进与插值-期望.txt') -Encoding UTF8
+    $gotInd  = Get-Content (Join-Path $bin '缩进与插值-输出.txt') -Encoding UTF8
+    $diffInd = Compare-Object -ReferenceObject $wantInd -DifferenceObject $gotInd
+    if ($diffInd) { $diffInd | Format-Table -AutoSize | Out-Host; throw '缩进与插值样例输出与期望不符' }
+
+    Write-Host '端到端：变量引用样例（【变量名】/连续多项打印，编译 -> 运行 -> 比对） ...'
+    $varExe = Join-Path $bin '变量引用.exe'
+    & (Join-Path $bin 'han.exe') (Join-Path $root 'tests\cases\变量引用.汉') -o $varExe
+    if ($LASTEXITCODE -ne 0) { throw '变量引用样例编译失败' }
+    & $varExe | Out-File -Encoding utf8 (Join-Path $bin '变量引用-输出.txt')
+    if ($LASTEXITCODE -ne 0) { throw '变量引用样例运行失败' }
+    $wantVar = Get-Content (Join-Path $root 'tests\cases\变量引用-期望.txt') -Encoding UTF8
+    $gotVar  = Get-Content (Join-Path $bin '变量引用-输出.txt') -Encoding UTF8
+    $diffVar = Compare-Object -ReferenceObject $wantVar -DifferenceObject $gotVar
+    if ($diffVar) { $diffVar | Format-Table -AutoSize | Out-Host; throw '变量引用样例输出与期望不符' }
+
     Write-Host '端到端：交互样例（输入文字/输入整数/输入数/文字转数，重定向喂入） ...'
     $ioExe = Join-Path $bin '交互.exe'
     & (Join-Path $bin 'han.exe') (Join-Path $root 'tests\cases\交互.汉') -o $ioExe
