@@ -37,6 +37,10 @@ typedef enum {
     TK_KW_CONTINUE,    /* 继续 / 跳过 */
     TK_KW_IMPORT,      /* 导入 / 引用 */
     TK_KW_FROM,        /* 从 */
+    TK_KW_WINDOW,      /* 窗口 */
+    TK_KW_WIN_TYPE,    /* 类型1 ~ 类型5（窗口种类编码） */
+    TK_KW_WIN_STYLE,   /* 样式1 ~ 样式5（窗口图标编码） */
+    TK_KW_WIN_BTNS,    /* 选项类型1 ~ 选项类型5（窗口按钮编码） */
 
     TK_LPAREN,         /* ( */
     TK_RPAREN,         /* ) */

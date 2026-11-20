@@ -26,6 +26,14 @@ static const struct {
     {"继续", TK_KW_CONTINUE}, {"跳过", TK_KW_CONTINUE},
     {"导入", TK_KW_IMPORT}, {"引用", TK_KW_IMPORT},
     {"从", TK_KW_FROM},
+    /* 窗口语句编码词（数字紧跟词面，词法上不可再拆，整体注册为关键字） */
+    {"窗口", TK_KW_WINDOW},
+    {"类型1", TK_KW_WIN_TYPE}, {"类型2", TK_KW_WIN_TYPE}, {"类型3", TK_KW_WIN_TYPE},
+    {"类型4", TK_KW_WIN_TYPE}, {"类型5", TK_KW_WIN_TYPE},
+    {"样式1", TK_KW_WIN_STYLE}, {"样式2", TK_KW_WIN_STYLE}, {"样式3", TK_KW_WIN_STYLE},
+    {"样式4", TK_KW_WIN_STYLE}, {"样式5", TK_KW_WIN_STYLE},
+    {"选项类型1", TK_KW_WIN_BTNS}, {"选项类型2", TK_KW_WIN_BTNS}, {"选项类型3", TK_KW_WIN_BTNS},
+    {"选项类型4", TK_KW_WIN_BTNS}, {"选项类型5", TK_KW_WIN_BTNS},
 };
 
 TokenKind ch_keyword_lookup(const char *word) {

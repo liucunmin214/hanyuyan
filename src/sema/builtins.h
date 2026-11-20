@@ -15,7 +15,7 @@ typedef struct {
     const char *name;      /* 语言内建名，如 "文字长度" */
     const char *sym;       /* 运行时符号，如 "rt_str_len"；为空表示特殊处理 */
     int         nparams;   /* 参数个数 */
-    TypeKind    params[4];
+    TypeKind    params[5];
     TypeKind    ret;
 } ChBuiltin;
 

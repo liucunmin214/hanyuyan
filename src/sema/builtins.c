@@ -51,6 +51,10 @@ static const ChBuiltin g_builtins[] = {
     /* 时间 */
     { "现在",       "rt_now_text",     0, { TY_VOID }, TY_STRING },
     { "现在毫秒",   "rt_now_ms",       0, { TY_VOID }, TY_INT },
+
+    /* 窗口（「窗口」语句的降糖目标，也可直接调用） */
+    { "弹出窗口",   "rt_window",       5,
+      { TY_INT, TY_INT, TY_INT, TY_STRING, TY_STRING }, TY_INT },
 };
 
 #define NB ((int)(sizeof(g_builtins) / sizeof(g_builtins[0])))

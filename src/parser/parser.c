@@ -16,6 +16,8 @@ typedef struct {
     const Token *tokens;
     size_t       pos;
     size_t       ntokens;
+    const char  *win_result;   /* 当前窗口分支的临时变量名，NULL 表示不在窗口块内 */
+    int          win_counter;  /* 窗口临时变量计数器 */
 } Parser;
 
 /* ---------- 工具 ---------- */
@@ -534,6 +536,63 @@ static Stmt *parse_block(Parser *p, bool *indent_style) {
     return ch_stmt_block(p->arena, 0, 0, arr, sc);
 }
 
+/* ---------- 窗口语句 ---------- */
+
+/* 取编码词（类型1~类型5 等）尾部的数字，词法表保证 1~5 */
+static int win_code_digit(const Token *t) {
+    size_t n = strlen(t->text);
+    return (n > 0 && t->text[n - 1] >= '1' && t->text[n - 1] <= '5')
+         ? t->text[n - 1] - '0' : 0;
+}
+
+/* 期望窗口编码词，返回 1~5；不匹配时报错并返回 0 */
+static int expect_win_code(Parser *p, TokenKind kind, const char *what) {
+    const Token *t = peek(p);
+    if (t->kind != kind) {
+        err(p, t->line, t->col, "窗口语句期望 %sN（N 为 1~5），实际为 %s",
+            what, ch_token_kind_name(t->kind));
+        return 0;
+    }
+    advance(p);
+    int d = win_code_digit(t);
+    if (d == 0) err(p, t->line, t->col, "%s编码超出范围（N 为 1~5）", what);
+    return d;
+}
+
+/* 期望窗口小节词（标题 / 窗口内容） */
+static bool expect_win_label(Parser *p, const char *label) {
+    const Token *t = peek(p);
+    if (t->kind == TK_IDENT && strcmp(t->text, label) == 0) {
+        advance(p);
+        return true;
+    }
+    err(p, t->line, t->col, "窗口语句期望 '%s'，实际为 %s", label,
+        ch_token_kind_name(t->kind));
+    return false;
+}
+
+/* 解析窗口标题/内容：必须紧跟一个文字字面量（支持插值） */
+static Expr *parse_win_text(Parser *p, const char *label) {
+    const Token *t = peek(p);
+    if (t->kind != TK_STRING && t->kind != TK_ISTRING) {
+        err(p, t->line, t->col, "'%s' 后应为双引号文字，实际为 %s",
+            label, ch_token_kind_name(t->kind));
+        return NULL;
+    }
+    return parse_primary(p);
+}
+
+/* 按钮名 -> 按钮编号（确定=1 取消=2 重试=4 是=6 否=7） */
+static int win_button_id(Parser *p, const char *name, int line, int col) {
+    if (strcmp(name, "确定") == 0) return 1;
+    if (strcmp(name, "取消") == 0) return 2;
+    if (strcmp(name, "重试") == 0) return 4;
+    if (strcmp(name, "是") == 0) return 6;
+    if (strcmp(name, "否") == 0) return 7;
+    err(p, line, col, "未知的按钮名 '%s'（可用：确定 / 取消 / 重试 / 是 / 否）", name);
+    return 0;
+}
+
 /* ---------- 语句 ---------- */
 static Stmt *parse_stmt(Parser *p) {
     skip_newlines(p);
@@ -572,7 +631,27 @@ static Stmt *parse_stmt(Parser *p) {
     }
     case TK_KW_IF: {
         advance(p);
-        Expr *cond = parse_expr(p);
+        Expr *cond = NULL;
+        if (p->win_result && check(p, TK_IDENT) &&
+            strcmp(peek(p)->text, "按下") == 0) {
+            /* 窗口分支：如果 按下"按钮名" → 窗口结果 == 按钮编号 */
+            advance(p);
+            const Token *bn = peek(p);
+            if (bn->kind == TK_STRING) {
+                advance(p);
+                int id = win_button_id(p, bn->sval ? bn->sval : "", bn->line, bn->col);
+                Expr *lhs = ch_ast_ident(p->arena, line, col, p->win_result);
+                cond = ch_ast_binary(p->arena, line, col, TK_EQ, lhs,
+                                     ch_ast_int(p->arena, line, col, id));
+            } else {
+                err(p, bn->line, bn->col,
+                    "「按下」后应为按钮名文字（\"确定\"/\"取消\"/\"重试\"/\"是\"/\"否\"）");
+                advance(p);
+                cond = ch_ast_int(p->arena, line, col, 0);
+            }
+        } else {
+            cond = parse_expr(p);
+        }
         skip_newlines(p);
         bool ind1 = false;
         Stmt *then_b = parse_block(p, &ind1);
@@ -644,6 +723,48 @@ static Stmt *parse_stmt(Parser *p) {
         }
         match(p, TK_SEMI);
         return ch_stmt_print(p->arena, line, col, e);
+    }
+    case TK_KW_WINDOW: {
+        advance(p);
+        int wtype  = expect_win_code(p, TK_KW_WIN_TYPE,  "类型");
+        int wstyle = expect_win_code(p, TK_KW_WIN_STYLE, "样式");
+        int wbtns  = expect_win_code(p, TK_KW_WIN_BTNS, "选项类型");
+        (void)expect_win_label(p, "标题");
+        Expr *wtitle = parse_win_text(p, "标题");
+        (void)expect_win_label(p, "窗口内容");
+        Expr *wbody = parse_win_text(p, "窗口内容");
+
+        /* 降糖：调用内置函数 弹出窗口(类型, 样式, 选项类型, 标题, 内容) */
+        Expr **wargs = ch_arena_alloc(p->arena, 5 * sizeof(Expr *));
+        wargs[0] = ch_ast_int(p->arena, line, col, wtype);
+        wargs[1] = ch_ast_int(p->arena, line, col, wstyle);
+        wargs[2] = ch_ast_int(p->arena, line, col, wbtns);
+        wargs[3] = wtitle;
+        wargs[4] = wbody;
+        Expr *wcallee = ch_ast_ident(p->arena, line, col, "弹出窗口");
+        Expr *wcall = ch_ast_call(p->arena, line, col, wcallee, wargs, 5);
+        match(p, TK_SEMI);
+        skip_newlines(p);
+        if (!check(p, TK_INDENT)) {
+            /* 无分支：直接弹窗，忽略按钮结果 */
+            return ch_stmt_expr(p->arena, line, col, wcall);
+        }
+        /* 带分支的缩进块：临时变量接住按钮结果，
+         * 块内可用「如果 按下"按钮名"」编写按下分支（名字含 @，用户标识符不可能冲突） */
+        char namebuf[32];
+        snprintf(namebuf, sizeof(namebuf), "窗口结果@%d", ++p->win_counter);
+        const char *tmpname = ch_arena_strdup(p->arena, namebuf);
+        Stmt *varstmt = ch_stmt_var(p->arena, line, col, tmpname, NULL, wcall);
+        const char *saved = p->win_result;
+        p->win_result = tmpname;
+        bool wind = false;
+        Stmt *wblock = parse_block(p, &wind);
+        p->win_result = saved;
+        int wn = wblock->u.block.count;
+        Stmt **warr = ch_arena_alloc(p->arena, (size_t)(wn + 1) * sizeof(Stmt *));
+        warr[0] = varstmt;
+        if (wn) memcpy(warr + 1, wblock->u.block.stmts, (size_t)wn * sizeof(Stmt *));
+        return ch_stmt_block(p->arena, line, col, warr, wn + 1);
     }
     case TK_KW_END:
         /* 不应在语句解析中遇到，交给上层 */
@@ -757,7 +878,7 @@ static Decl *parse_decl(Parser *p) {
 
 AstNode **ch_parse(ChArena *arena, ChDiagList *diags,
                    const Token *tokens, size_t ntokens, int *out_count) {
-    Parser p = { arena, diags, tokens, 0, ntokens };
+    Parser p = { arena, diags, tokens, 0, ntokens, NULL, 0 };
     ChVec decls;
     ch_vec_init(&decls, sizeof(AstNode*));
     skip_newlines(&p);

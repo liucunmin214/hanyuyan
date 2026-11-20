@@ -723,6 +723,214 @@ i64 rt_now_ms(void) {
     return ((i64)t.hour * 3600 + (i64)t.minute * 60 + (i64)t.second) * 1000 + (i64)t.millis;
 }
 
+/* ==================== 窗口 ==================== */
+
+/* 「窗口」语句的实现：基于系统消息框（MessageBoxW），按类型编码定制外观。
+ * 类型1：标准（跟随系统：Win11 圆角、浅色）
+ * 类型2：深色（深色标题栏 + 深色客户区 + 白字 + 深色按钮）
+ * 类型3：模糊（亚克力半透明背景，Win11 22H2+ 生效，旧系统自动回退标准）
+ * 类型4：方角（强制 Win10 风格方角）
+ * 类型5：旧式（方角 + 关闭 DWM 非客户区渲染，最接近经典旧窗口）
+ * 样式1~5：红叉 / 黄三角 / 蓝信息 / 问号 / 无图标
+ * 选项类型1~5：确定 / 确定+取消 / 是+否 / 是+否+取消 / 重试+取消
+ * 返回按钮编号：确定=1 取消=2 重试=4 是=6 否=7 */
+
+/* 新增 kernel32 导入（动态加载其他 DLL 的基础） */
+__declspec(dllimport) void *LoadLibraryW(const u16 *name);
+__declspec(dllimport) void *GetProcAddress(void *mod, const char *fn);
+__declspec(dllimport) unsigned int GetCurrentThreadId(void);
+
+/* user32 / gdi32 / dwmapi / uxtheme 函数指针（x64 统一调用约定） */
+typedef int    (*FnMessageBoxW)(void *h, const u16 *text, const u16 *cap, u32 type);
+typedef void *(*FnSetWindowsHookExW)(int id, i64 (*proc)(int, u64, i64), void *mod, u32 tid);
+typedef int    (*FnUnhookWindowsHookEx)(void *h);
+typedef i64    (*FnCallNextHookEx)(void *h, int code, u64 wp, i64 lp);
+typedef i64    (*FnSetWindowLongPtrW)(void *h, int idx, i64 val);
+typedef i64    (*FnCallWindowProcW)(i64 prev, void *h, u32 msg, u64 wp, i64 lp);
+typedef i64    (*FnDwmSetWindowAttribute)(void *h, u32 attr, void *val, u32 size);
+typedef void *(*FnCreateSolidBrush)(u32 color);
+typedef u32    (*FnSetTextColor)(void *hdc, u32 color);
+typedef u32    (*FnSetBkColor)(void *hdc, u32 color);
+typedef i64    (*FnSetWindowTheme)(void *h, const u16 *subapp, const u16 *subid);
+typedef void *(*FnGetWindow)(void *h, u32 cmd);
+typedef int    (*FnGetClassNameW)(void *h, u16 *buf, int max);
+
+static FnMessageBoxW          p_MessageBoxW;
+static FnSetWindowsHookExW    p_SetWindowsHookExW;
+static FnUnhookWindowsHookEx  p_UnhookWindowsHookEx;
+static FnCallNextHookEx       p_CallNextHookEx;
+static FnSetWindowLongPtrW    p_SetWindowLongPtrW;
+static FnCallWindowProcW      p_CallWindowProcW;
+static FnDwmSetWindowAttribute p_DwmSetWindowAttribute;
+static FnCreateSolidBrush     p_CreateSolidBrush;
+static FnSetTextColor         p_SetTextColor;
+static FnSetBkColor           p_SetBkColor;
+static FnSetWindowTheme       p_SetWindowTheme;
+static FnGetWindow            p_GetWindow;
+static FnGetClassNameW        p_GetClassNameW;
+
+static void *g_hook;       /* 当前 CBT 钩子句柄 */
+static int   g_kind;       /* 本次窗口类型编码 */
+static i64   g_prev_proc;  /* 深色子类化保存的原窗口过程 */
+static void *g_dark_brush; /* 深色客户区画刷 */
+
+static const u16 WIN_DLL_USER32[]  = {'u','s','e','r','3','2','.','d','l','l',0};
+static const u16 WIN_DLL_GDI32[]   = {'g','d','i','3','2','.','d','l','l',0};
+static const u16 WIN_DLL_DWMAPI[]  = {'d','w','m','a','p','i','.','d','l','l',0};
+static const u16 WIN_DLL_UXTHEME[] = {'u','x','t','h','e','m','e','.','d','l','l',0};
+static const u16 WIN_EMPTY16[]    = {0};
+static const u16 WIN_DARK_THEME[] = {'D','a','r','k','M','o','d','e','_','E','x','p','l','o','r','e','r',0};
+
+/* 惰性加载全部函数指针；核心指针齐全返回 1，辅助指针失败仅置空（特性自动退化） */
+static int win_init(void) {
+    static int inited = 0, ok = 0;
+    if (inited) return ok;
+    inited = 1;
+
+    void *u32 = LoadLibraryW(WIN_DLL_USER32);
+    if (!u32) return 0;
+    p_MessageBoxW         = (FnMessageBoxW)GetProcAddress(u32, "MessageBoxW");
+    p_SetWindowsHookExW   = (FnSetWindowsHookExW)GetProcAddress(u32, "SetWindowsHookExW");
+    p_UnhookWindowsHookEx = (FnUnhookWindowsHookEx)GetProcAddress(u32, "UnhookWindowsHookEx");
+    p_CallNextHookEx      = (FnCallNextHookEx)GetProcAddress(u32, "CallNextHookEx");
+    p_SetWindowLongPtrW   = (FnSetWindowLongPtrW)GetProcAddress(u32, "SetWindowLongPtrW");
+    p_CallWindowProcW     = (FnCallWindowProcW)GetProcAddress(u32, "CallWindowProcW");
+    p_GetWindow           = (FnGetWindow)GetProcAddress(u32, "GetWindow");
+    p_GetClassNameW       = (FnGetClassNameW)GetProcAddress(u32, "GetClassNameW");
+    if (!p_MessageBoxW || !p_SetWindowsHookExW || !p_UnhookWindowsHookEx ||
+        !p_CallNextHookEx || !p_SetWindowLongPtrW || !p_CallWindowProcW)
+        return 0;
+
+    void *gdi = LoadLibraryW(WIN_DLL_GDI32);
+    if (gdi) {
+        p_CreateSolidBrush = (FnCreateSolidBrush)GetProcAddress(gdi, "CreateSolidBrush");
+        p_SetTextColor     = (FnSetTextColor)GetProcAddress(gdi, "SetTextColor");
+        p_SetBkColor       = (FnSetBkColor)GetProcAddress(gdi, "SetBkColor");
+    }
+
+    void *dwm = LoadLibraryW(WIN_DLL_DWMAPI);
+    if (dwm)
+        p_DwmSetWindowAttribute =
+            (FnDwmSetWindowAttribute)GetProcAddress(dwm, "DwmSetWindowAttribute");
+
+    void *theme = LoadLibraryW(WIN_DLL_UXTHEME);
+    if (theme)
+        p_SetWindowTheme = (FnSetWindowTheme)GetProcAddress(theme, "SetWindowTheme");
+
+    if (p_CreateSolidBrush)
+        g_dark_brush = p_CreateSolidBrush(0x00202020u);   /* RGB(32,32,32) */
+
+    ok = 1;
+    return ok;
+}
+
+/* 深色客户区：对话框背景与静态文字（标题/内容由 STATIC 控件绘制） */
+static i64 win_dark_proc(void *hwnd, u32 msg, u64 wp, i64 lp) {
+    if (msg == 320 /* WM_CTLCOLORDLG */ && g_dark_brush)
+        return (i64)(u64)g_dark_brush;
+    if (msg == 317 /* WM_CTLCOLORSTATIC */ && g_dark_brush) {
+        if (p_SetTextColor) p_SetTextColor((void *)(u64)lp, 0x00F0F0F0u);
+        if (p_SetBkColor)   p_SetBkColor((void *)(u64)lp, 0x00202020u);
+        return (i64)(u64)g_dark_brush;
+    }
+    return p_CallWindowProcW(g_prev_proc, hwnd, msg, wp, lp);
+}
+
+/* 把消息框内所有 Button 子窗口切到系统深色主题 */
+static void win_dark_buttons(void *hwnd) {
+    if (!p_GetWindow || !p_GetClassNameW || !p_SetWindowTheme) return;
+    void *ch = p_GetWindow(hwnd, 5 /* GW_CHILD */);
+    while (ch) {
+        u16 cls[8];
+        int i;
+        p_GetClassNameW(ch, cls, 8);
+        for (i = 0; cls[i]; i++) { /* 空 */ }
+        if (i == 6 && cls[0]=='B' && cls[1]=='u' && cls[2]=='t' &&
+            cls[3]=='t' && cls[4]=='o' && cls[5]=='n')
+            p_SetWindowTheme(ch, WIN_DARK_THEME, (const u16 *)0);
+        ch = p_GetWindow(ch, 2 /* GW_HWNDNEXT */);
+    }
+}
+
+/* 在消息框显示前应用类型对应的外观 */
+static void win_apply_kind(void *hwnd) {
+    int on = 1, pref = 1 /* DWMWCP_DONOTROUND */, dis = 2 /* DWMNCRP_DISABLED */;
+    int backdrop = 3 /* DWMSB_TRANSIENTWINDOW：亚克力 */;
+    if (!p_DwmSetWindowAttribute) return;
+    switch (g_kind) {
+    case 2: /* 深色 */
+        p_DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &on, 4);
+        p_DwmSetWindowAttribute(hwnd, 19 /* 兼容 1809 早期版本 */, &on, 4);
+        win_dark_buttons(hwnd);
+        if (p_SetWindowLongPtrW)
+            g_prev_proc = p_SetWindowLongPtrW(hwnd, -4 /* GWLP_WNDPROC */,
+                                               (i64)(u64)win_dark_proc);
+        break;
+    case 3: /* 模糊 */
+        p_DwmSetWindowAttribute(hwnd, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &backdrop, 4);
+        break;
+    case 4: /* 方角 */
+        p_DwmSetWindowAttribute(hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &pref, 4);
+        break;
+    case 5: /* 旧式 */
+        p_DwmSetWindowAttribute(hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &pref, 4);
+        p_DwmSetWindowAttribute(hwnd, 2 /* DWMWA_NCRENDERING_POLICY：关闭 DWM 渲染 */,
+                                &dis, 4);
+        break;
+    default:
+        break;
+    }
+}
+
+/* CBT 钩子：捕获消息框窗口，抢在显示前应用外观后立即摘除 */
+static i64 win_cbt_proc(int code, u64 wp, i64 lp) {
+    if (code == 5 /* HCBT_ACTIVATE */) {
+        if (g_hook) {
+            p_UnhookWindowsHookEx(g_hook);
+            g_hook = (void *)0;
+        }
+        win_apply_kind((void *)(u64)wp);
+    }
+    return p_CallNextHookEx((void *)0, code, wp, lp);
+}
+
+i64 rt_window(i64 type, i64 style, i64 btns, RtStr *title, RtStr *body) {
+    static const u32 BTN_T[6]  = {0, 0 /*MB_OK*/, 1 /*OKCANCEL*/, 4 /*YESNO*/,
+                                  3 /*YESNOCANCEL*/, 5 /*RETRYCANCEL*/};
+    static const u32 ICON_T[6] = {0, 0x10 /*HAND*/, 0x30 /*EXCLAMATION*/,
+                                  0x40 /*ASTERISK*/, 0x20 /*QUESTION*/, 0};
+    if (!win_init()) {
+        /* 极端环境退化：把内容输出到控制台 */
+        write_cstr("[窗口] ");
+        if (title) write_bytes(title->data, (u64)title->len);
+        write_cstr("：");
+        if (body) write_bytes(body->data, (u64)body->len);
+        write_cstr("\n");
+        return 1;
+    }
+    if (type < 1 || type > 5) type = 1;
+    if (style < 1 || style > 5) style = 3;
+    if (btns < 1 || btns > 5) btns = 1;
+
+    u16 *wtitle = utf8_to_utf16(title);
+    u16 *wbody  = utf8_to_utf16(body);
+    u32 ut = BTN_T[btns] | ICON_T[style] | 0x10000u /* MB_SETFOREGROUND */;
+
+    if (type != 1 && p_SetWindowsHookExW) {
+        g_kind = (int)type;
+        g_hook = p_SetWindowsHookExW(5 /* WH_CBT */, win_cbt_proc,
+                                     (void *)0, GetCurrentThreadId());
+    }
+    int r = p_MessageBoxW(GetConsoleWindow(),
+                          wbody ? wbody : WIN_EMPTY16,
+                          wtitle ? wtitle : WIN_EMPTY16, ut);
+    if (g_hook) {
+        p_UnhookWindowsHookEx(g_hook);
+        g_hook = (void *)0;
+    }
+    return r;
+}
+
 /* ==================== 键盘输入 ==================== */
 
 /* UTF-16 转 UTF-8（配合 ReadConsoleW 读取中文输入） */

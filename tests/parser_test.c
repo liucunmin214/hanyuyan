@@ -420,6 +420,61 @@ static void t_indent_dict_in_interp(void) {
     ch_arena_destroy(a);
 }
 
+static void t_window_stmt(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    AstNode **decls = parse_str(a, &d,
+        "窗口 类型1 样式3 选项类型1 标题\"提示\" 窗口内容\"你好\"\n", &n);
+    CHECK(ch_diag_error_count(&d) == 0, "窗口语句无错误");
+    Stmt *s = decls[0]->as.decl->u.stmt;
+    CHECK(s->kind == ST_EXPR, "无分支窗口降糖为表达式语句");
+    Expr *call = s->u.expr.expr;
+    CHECK(call->kind == EX_CALL && call->u.call.nargs == 5, "降糖为五参调用");
+    CHECK(call->u.call.callee->kind == EX_IDENT &&
+          strcmp(call->u.call.callee->u.sval, "弹出窗口") == 0,
+          "调用目标为内置函数");
+    CHECK(call->u.call.args[0]->kind == EX_INT &&
+          call->u.call.args[0]->u.ival == 1, "类型实参");
+    CHECK(call->u.call.args[1]->u.ival == 3, "样式实参");
+    CHECK(call->u.call.args[2]->u.ival == 1, "选项类型实参");
+    CHECK(call->u.call.args[3]->kind == EX_STRING &&
+          strcmp(call->u.call.args[3]->u.sval, "提示") == 0, "标题字符串");
+    CHECK(strcmp(call->u.call.args[4]->u.sval, "你好") == 0, "窗口内容字符串");
+    ch_arena_destroy(a);
+}
+
+static void t_window_branch(void) {
+    ChArena *a = ch_arena_new();
+    ChDiagList d; ch_diag_init(&d, a);
+    int n = 0;
+    AstNode **decls = parse_str(a, &d,
+        "窗口 类型3 样式2 选项类型3 标题\"确认\" 窗口内容\"继续吗\"\n"
+        "    如果 按下\"是\"\n        打印 \"是\"\n"
+        "    如果 按下\"否\"\n        打印 \"否\"\n", &n);
+    CHECK(ch_diag_error_count(&d) == 0, "窗口分支块无错误");
+    Stmt *s = decls[0]->as.decl->u.stmt;
+    CHECK(s->kind == ST_BLOCK && s->u.block.count == 3,
+          "分支窗口降糖为语句块（临时变量 + 两个按下分支）");
+    Stmt *var = s->u.block.stmts[0];
+    CHECK(var->kind == ST_VAR && var->u.var.init &&
+          var->u.var.init->kind == EX_CALL, "临时变量接住按钮结果");
+    Stmt *if1 = s->u.block.stmts[1];
+    CHECK(if1->kind == ST_IF, "按下分支为如果语句");
+    Expr *cond = if1->u.iff.cond;
+    CHECK(cond->kind == EX_BINARY && cond->u.binary.op == TK_EQ,
+          "按下条件为相等比较");
+    CHECK(cond->u.binary.rhs->kind == EX_INT &&
+          cond->u.binary.rhs->u.ival == 6, "按下\"是\"映射按钮编号 6");
+    CHECK(cond->u.binary.lhs->kind == EX_IDENT &&
+          strcmp(cond->u.binary.lhs->u.sval, var->u.var.name) == 0,
+          "条件引用临时结果变量");
+    Stmt *if2 = s->u.block.stmts[2];
+    CHECK(if2->kind == ST_IF && if2->u.iff.cond->u.binary.rhs->u.ival == 7,
+          "按下\"否\"映射按钮编号 7");
+    ch_arena_destroy(a);
+}
+
 int main(void) {
     t_function_decl();
     t_var_decl();
@@ -453,6 +508,8 @@ int main(void) {
     t_varref_assignment();
     t_print_multiple_items();
     t_varref_postfix();
+    t_window_stmt();
+    t_window_branch();
     printf("解析器测试：通过 %d 例，失败 %d 例\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }
